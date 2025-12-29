@@ -141,11 +141,9 @@ Every operation emits telemetry; nothing is invisible.
 | [01_ARCHITECTURE_PATTERNS.md](./01_ARCHITECTURE_PATTERNS.md) | Architectural options analysis |
 | [02_COMPONENT_DESIGN.md](./02_COMPONENT_DESIGN.md) | Core component specifications |
 | [03_WORKFLOW_ENGINE.md](./03_WORKFLOW_ENGINE.md) | Workflow/pipeline design |
-| [04_PORT_CONTRACTS.md](./04_PORT_CONTRACTS.md) | Port behavior definitions |
-| [05_TELEMETRY_DESIGN.md](./05_TELEMETRY_DESIGN.md) | Observability architecture |
-| [06_API_SURFACE.md](./06_API_SURFACE.md) | Public API design |
-| [07_MIGRATION_GUIDE.md](./07_MIGRATION_GUIDE.md) | tinkex_cookbook transformation |
-| [08_IMPLEMENTATION_ROADMAP.md](./08_IMPLEMENTATION_ROADMAP.md) | Phased delivery plan |
+| [04_API_SURFACE.md](./04_API_SURFACE.md) | Public API design |
+| [05_IMPLEMENTATION_ROADMAP.md](./05_IMPLEMENTATION_ROADMAP.md) | Phased delivery plan |
+| [06_ECOSYSTEM_INTEGRATION.md](./06_ECOSYSTEM_INTEGRATION.md) | Crucible ecosystem integration |
 
 ---
 
