@@ -63,14 +63,42 @@ defmodule CrucibleKitchen.Adapters.Tinkex.TrainingClient do
   end
 
   @impl true
-  @spec forward_backward(keyword(), session(), [Datum.t()]) :: Task.t()
-  def forward_backward(_adapter_opts, %{id: training_client}, datums) do
+  @spec forward_backward(keyword(), session(), [Datum.t()], keyword()) :: Task.t()
+  def forward_backward(_adapter_opts, %{id: training_client}, datums, opts_kw) do
     # Convert CrucibleTrain datums to Tinkex format
     tinkex_data = Enum.map(datums, &datum_to_tinkex/1)
+    loss_fn = Keyword.get(opts_kw, :loss_fn, :cross_entropy)
+    tinkex_opts = Keyword.delete(opts_kw, :loss_fn)
 
     # Submit forward_backward and return the task as a future
     {:ok, task} =
-      Tinkex.TrainingClient.forward_backward(training_client, tinkex_data, :cross_entropy)
+      Tinkex.TrainingClient.forward_backward(training_client, tinkex_data, loss_fn, tinkex_opts)
+
+    task
+  end
+
+  def forward_backward(adapter_opts, session, datums) do
+    forward_backward(adapter_opts, session, datums, [])
+  end
+
+  @impl true
+  @spec forward_backward_custom(
+          keyword(),
+          session(),
+          [Datum.t()],
+          (list(Datum.t()), list(term()) -> {term(), map()}),
+          keyword()
+        ) :: Task.t() | {:error, term()}
+  def forward_backward_custom(_adapter_opts, %{id: training_client}, datums, loss_fn, opts_kw) do
+    tinkex_data = Enum.map(datums, &datum_to_tinkex/1)
+
+    {:ok, task} =
+      Tinkex.TrainingClient.forward_backward_custom(
+        training_client,
+        tinkex_data,
+        loss_fn,
+        opts_kw
+      )
 
     task
   end

@@ -23,13 +23,35 @@ defmodule CrucibleKitchen.Adapters.Noop.TrainingClient do
   end
 
   @impl true
-  def forward_backward(_opts, session, datums) do
+  def forward_backward(_opts, session, datums, opts_kw) do
     batch_size = length(datums)
+    loss_fn = Keyword.get(opts_kw, :loss_fn, :cross_entropy)
+    loss_fn_config = Keyword.get(opts_kw, :loss_fn_config)
 
     future = %{
       type: :forward_backward,
       session_id: session.id,
       batch_size: batch_size,
+      loss_fn: loss_fn,
+      loss_fn_config: loss_fn_config,
+      submitted_at: DateTime.utc_now()
+    }
+
+    future
+  end
+
+  def forward_backward(opts, session, datums) do
+    forward_backward(opts, session, datums, [])
+  end
+
+  @impl true
+  def forward_backward_custom(_opts, session, datums, loss_fn, opts_kw) do
+    future = %{
+      type: :forward_backward_custom,
+      session_id: session.id,
+      batch_size: length(datums),
+      loss_fn: loss_fn,
+      opts: opts_kw,
       submitted_at: DateTime.utc_now()
     }
 
@@ -64,6 +86,12 @@ defmodule CrucibleKitchen.Adapters.Noop.TrainingClient do
           %{
             grad_norm: :rand.uniform() * 10,
             duration_ms: :rand.uniform(50) + 10
+          }
+
+        :forward_backward_custom ->
+          %{
+            loss: :rand.uniform() * 2,
+            duration_ms: :rand.uniform(100) + 50
           }
 
         :dpo_forward_backward ->

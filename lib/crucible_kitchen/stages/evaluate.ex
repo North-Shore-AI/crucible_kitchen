@@ -155,8 +155,10 @@ defmodule CrucibleKitchen.Stages.Evaluate do
         eval_samples = get_config(context, :eval_samples, @default_eval_samples)
 
         if dataset_name do
-          load_opts = Keyword.merge(store_opts, split: "test", limit: eval_samples)
-          dataset_store.load(load_opts, dataset_name)
+          # Use the standard DatasetStore port callback with correct signature:
+          # load_dataset(adapter_opts, repo_id, load_opts)
+          load_opts = [split: "test", limit: eval_samples]
+          dataset_store.load_dataset(store_opts, to_string(dataset_name), load_opts)
         else
           {:error, :no_eval_dataset}
         end

@@ -8,9 +8,11 @@ defmodule CrucibleKitchen.Stages.DoRollout do
   ## Context Requirements
 
   **Input:**
-  - State: `:env_group` - Environment group from BuildEnvGroup
-  - State: `:session` - Training session for action sampling
+  - State: `:env_group` - Environment group builder from BuildEnvGroup
+  - State: `:token_completer` - Token completer (optional)
+  - State: `:sampling_session` - Sampling session (optional)
   - Config: `:max_tokens` - Maximum tokens per response (default: 512)
+  - Config: `:temperature` - Sampling temperature (default: 1.0)
 
   **Output:**
   - State: `:trajectory_group` - Collected trajectories with rewards
@@ -36,6 +38,9 @@ defmodule CrucibleKitchen.Stages.DoRollout do
   use CrucibleKitchen.Stage
 
   alias CrucibleKitchen.Context
+  alias CrucibleTrain.Completers.PortsTokenCompleter
+  alias CrucibleTrain.Ports.SamplingClient
+  alias CrucibleTrain.RL.{Rollouts, TrajectoryGroup}
 
   require Logger
 
@@ -45,17 +50,12 @@ defmodule CrucibleKitchen.Stages.DoRollout do
   @impl true
   def execute(context) do
     env_group = Context.get_state(context, :env_group)
-    session = Context.get_state(context, :session)
     rollout_index = Context.get_state(context, :rollouts_index, 0)
     max_tokens = Context.get_config(context, :max_tokens, 512)
+    temperature = Context.get_config(context, :temperature, 1.0)
 
-    case get_adapter(context, :training_client) do
-      nil ->
-        # No adapter - use mock rollout
-        mock_rollout(context, env_group, rollout_index)
-
-      {adapter, opts} ->
-        run_rollout(context, adapter, opts, session, env_group, rollout_index, max_tokens)
+    with {:ok, context, completer} <- ensure_token_completer(context, max_tokens, temperature) do
+      run_rollout(context, env_group, completer, rollout_index)
     end
   end
 
@@ -67,54 +67,19 @@ defmodule CrucibleKitchen.Stages.DoRollout do
     end
   end
 
-  defp run_rollout(context, adapter, opts, session, env_group, rollout_index, max_tokens) do
+  defp run_rollout(context, env_group, completer, rollout_index) do
     Logger.debug("Starting rollout #{rollout_index + 1}")
 
     start_time = System.monotonic_time(:millisecond)
 
-    # Create environments for this rollout
-    envs = env_group.make_envs(%{rollout_index: rollout_index})
-
-    # Collect trajectories in parallel
-    trajectories =
-      envs
-      |> Task.async_stream(
-        fn env ->
-          collect_trajectory(adapter, opts, session, env, max_tokens)
-        end,
-        max_concurrency: length(envs),
-        timeout: 60_000
-      )
-      |> Enum.map(fn {:ok, traj} -> traj end)
-
+    trajectory_group = Rollouts.do_group_rollout(env_group, completer)
     duration_ms = System.monotonic_time(:millisecond) - start_time
-
-    # Compute group-level metrics
-    rewards = Enum.flat_map(trajectories, & &1.rewards)
-    reward_mean = if rewards == [], do: 0.0, else: Enum.sum(rewards) / length(rewards)
-    reward_std = compute_std(rewards, reward_mean)
-
-    trajectory_group = %{
-      trajectories: trajectories,
-      rewards: rewards,
-      reward_mean: reward_mean,
-      reward_std: reward_std,
-      num_trajectories: length(trajectories),
-      rollout_index: rollout_index
-    }
-
-    rollout_metrics = %{
-      duration_ms: duration_ms,
-      num_trajectories: length(trajectories),
-      total_steps: Enum.sum(Enum.map(trajectories, &length(&1.rewards))),
-      reward_mean: reward_mean,
-      reward_std: reward_std
-    }
+    rollout_metrics = compute_rollout_metrics(trajectory_group, duration_ms)
 
     Logger.debug(
       "Rollout #{rollout_index + 1} complete: " <>
-        "#{length(trajectories)} trajectories, " <>
-        "reward_mean=#{Float.round(reward_mean, 4)}"
+        "#{rollout_metrics.num_trajectories} trajectories, " <>
+        "reward_mean=#{Float.round(rollout_metrics.reward_mean, 4)}"
     )
 
     emit_telemetry(rollout_index, rollout_metrics)
@@ -125,85 +90,81 @@ defmodule CrucibleKitchen.Stages.DoRollout do
     |> then(&{:ok, &1})
   end
 
-  defp collect_trajectory(adapter, opts, session, env, max_tokens) do
-    # Single trajectory collection
-    initial_obs = env.observation
+  defp ensure_token_completer(context, max_tokens, temperature) do
+    case Context.get_state(context, :token_completer) do
+      nil ->
+        ports = get_train_ports(context)
 
-    # Sample action from policy
-    case adapter.sample(opts, session, initial_obs, max_tokens: max_tokens) do
-      {:ok, %{response: action, logprobs: logprobs}} ->
-        # Get reward from environment (mock for now)
-        reward = compute_reward(env, action)
+        case get_sampling_session(context, ports) do
+          {:ok, context, session} ->
+            completer =
+              PortsTokenCompleter.new(
+                ports: ports,
+                session: session,
+                max_tokens: max_tokens,
+                temperature: temperature
+              )
 
-        %{
-          observations: [initial_obs],
-          actions: [action],
-          rewards: [reward],
-          dones: [true],
-          logprobs: [logprobs]
-        }
+            context =
+              context
+              |> Context.put_state(:token_completer, completer)
 
-      {:error, _reason} ->
-        # Return empty trajectory on error
-        %{
-          observations: [initial_obs],
-          actions: [""],
-          rewards: [0.0],
-          dones: [true],
-          logprobs: [0.0]
-        }
+            {:ok, context, completer}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      completer ->
+        {:ok, context, completer}
     end
   end
 
-  defp compute_reward(env, _action) do
-    # In real implementation, this would evaluate the action
-    # For now, return mock reward
-    Map.get(env, :mock_reward, :rand.uniform())
+  defp get_sampling_session(context, ports) do
+    case Context.get_state(context, :sampling_session) do
+      nil ->
+        config = sampling_config(context)
+
+        case SamplingClient.start_session(ports, config) do
+          {:ok, session} ->
+            {:ok, Context.put_state(context, :sampling_session, session), session}
+
+          {:error, reason} ->
+            {:error, {:sampling_session_failed, reason}}
+        end
+
+      session ->
+        {:ok, context, session}
+    end
   end
 
-  defp mock_rollout(context, env_group, rollout_index) do
-    Logger.debug("Using mock rollout (no training_client adapter)")
+  defp sampling_config(context) do
+    %{
+      model: Context.get_config(context, :model),
+      base_model: Context.get_config(context, :base_model),
+      model_path: Context.get_config(context, :sampling_model_path),
+      checkpoint_path: Context.get_config(context, :checkpoint_path)
+    }
+  end
 
-    group_size = env_group.config.group_size
+  defp compute_rollout_metrics(%TrajectoryGroup{} = group, duration_ms) do
+    rewards = TrajectoryGroup.get_total_rewards(group)
+    reward_mean = if rewards == [], do: 0.0, else: Enum.sum(rewards) / length(rewards)
+    reward_std = compute_std(rewards, reward_mean)
+    num_trajectories = length(group.trajectories_G)
 
-    # Generate mock trajectories
-    trajectories =
-      Enum.map(1..group_size, fn i ->
-        reward = :rand.uniform()
-
-        %{
-          observations: ["Mock observation #{i}"],
-          actions: ["Mock action #{i}"],
-          rewards: [reward],
-          dones: [true],
-          logprobs: [-:rand.uniform() * 5]
-        }
+    total_steps =
+      Enum.reduce(group.trajectories_G, 0, fn traj, acc ->
+        acc + length(traj.transitions)
       end)
 
-    rewards = Enum.flat_map(trajectories, & &1.rewards)
-    reward_mean = Enum.sum(rewards) / length(rewards)
-
-    trajectory_group = %{
-      trajectories: trajectories,
-      rewards: rewards,
+    %{
+      duration_ms: duration_ms,
+      num_trajectories: num_trajectories,
+      total_steps: total_steps,
       reward_mean: reward_mean,
-      reward_std: compute_std(rewards, reward_mean),
-      num_trajectories: length(trajectories),
-      rollout_index: rollout_index
+      reward_std: reward_std
     }
-
-    rollout_metrics = %{
-      duration_ms: 0,
-      num_trajectories: length(trajectories),
-      total_steps: length(rewards),
-      reward_mean: reward_mean,
-      reward_std: compute_std(rewards, reward_mean)
-    }
-
-    context
-    |> Context.put_state(:trajectory_group, trajectory_group)
-    |> Context.put_state(:rollout_metrics, rollout_metrics)
-    |> then(&{:ok, &1})
   end
 
   defp compute_std([], _mean), do: 0.0

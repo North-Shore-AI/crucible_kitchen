@@ -32,6 +32,8 @@ defmodule CrucibleKitchen.Stages.DPOForwardBackward do
   use CrucibleKitchen.Stage
 
   alias CrucibleKitchen.Context
+  alias CrucibleTrain.Ports.TrainingClient
+  alias CrucibleTrain.Types.TensorData
 
   require Logger
 
@@ -41,26 +43,19 @@ defmodule CrucibleKitchen.Stages.DPOForwardBackward do
   @impl true
   def execute(context) do
     session = Context.get_state(context, :session)
-    batch = Context.get_state(context, :preference_batch)
+    datums = Context.get_state(context, :preference_datums)
     ref_chosen = Context.get_state(context, :ref_chosen_logprobs)
     ref_rejected = Context.get_state(context, :ref_rejected_logprobs)
     beta = Context.get_config(context, :dpo_beta, 0.1)
 
-    case get_adapter(context, :training_client) do
-      nil ->
-        # No adapter - mock DPO computation
-        mock_dpo(context, batch, beta)
-
-      {adapter, opts} ->
-        run_dpo(context, adapter, opts, session, batch, ref_chosen, ref_rejected, beta)
-    end
+    run_dpo(context, session, datums, ref_chosen, ref_rejected, beta)
   end
 
   @impl true
   def validate(context) do
     cond do
-      Context.get_state(context, :preference_batch) == nil ->
-        {:error, "preference_batch is required in state"}
+      Context.get_state(context, :preference_datums) == nil ->
+        {:error, "preference_datums is required in state (run ComputeReferenceLogprobs first)"}
 
       Context.get_state(context, :ref_chosen_logprobs) == nil ->
         {:error, "ref_chosen_logprobs is required (run ComputeReferenceLogprobs first)"}
@@ -73,45 +68,94 @@ defmodule CrucibleKitchen.Stages.DPOForwardBackward do
     end
   end
 
-  defp run_dpo(context, adapter, opts, session, batch, ref_chosen, ref_rejected, beta) do
+  defp run_dpo(context, session, datums, ref_chosen, ref_rejected, beta) do
     Logger.debug("Running DPO forward-backward with beta=#{beta}")
 
-    dpo_input = %{
-      batch: batch,
-      ref_chosen_logprobs: ref_chosen,
-      ref_rejected_logprobs: ref_rejected,
-      beta: beta
-    }
+    ports = get_train_ports(context)
+    ref_logprobs = interleave_logprobs(ref_chosen, ref_rejected)
 
-    # Start async DPO computation
-    future = adapter.dpo_forward_backward(opts, session, dpo_input)
+    loss_fn = build_dpo_loss_fn(ref_logprobs, beta)
+
+    future = TrainingClient.forward_backward_custom(ports, session, datums, loss_fn, [])
 
     context
     |> Context.put_state(:dpo_future, future)
     |> then(&{:ok, &1})
   end
 
-  defp mock_dpo(context, batch, beta) do
-    Logger.debug("Using mock DPO computation (no training_client adapter)")
+  defp build_dpo_loss_fn(ref_logprobs, beta) do
+    ref_logprobs = normalize_logprobs(ref_logprobs)
 
-    # Simulate DPO metrics
-    num_pairs = length(batch)
+    fn datums, logprobs_list ->
+      weights_list = Enum.map(datums, &weights_to_nx/1)
 
-    mock_metrics = %{
-      loss: :rand.uniform() * 0.5 + 0.3,
-      accuracy: :rand.uniform() * 0.3 + 0.5,
-      chosen_reward: :rand.uniform() * 2 - 1,
-      rejected_reward: :rand.uniform() * 2 - 2,
-      margin: :rand.uniform() * 0.5 + 0.1,
-      beta: beta,
-      num_pairs: num_pairs
-    }
+      chosen = Enum.take_every(logprobs_list, 2)
+      rejected = logprobs_list |> Enum.drop(1) |> Enum.take_every(2)
+      ref_chosen = Enum.take_every(ref_logprobs, 2)
+      ref_rejected = ref_logprobs |> Enum.drop(1) |> Enum.take_every(2)
 
-    # Return immediately (no async)
-    context
-    |> Context.put_state(:dpo_future, {:ok, mock_metrics})
-    |> Context.put_state(:dpo_loss, mock_metrics.loss)
-    |> Context.put_state(:dpo_metrics, mock_metrics)
-    |> then(&{:ok, &1})
+      chosen_logprob = weighted_logprobs(chosen, weights_list, 0)
+      rejected_logprob = weighted_logprobs(rejected, weights_list, 1)
+      ref_chosen_logprob = weighted_logprobs(ref_chosen, weights_list, 0)
+      ref_rejected_logprob = weighted_logprobs(ref_rejected, weights_list, 1)
+
+      chosen_log_ratio = Nx.subtract(chosen_logprob, ref_chosen_logprob)
+      rejected_log_ratio = Nx.subtract(rejected_logprob, ref_rejected_logprob)
+
+      logits = Nx.multiply(beta, Nx.subtract(chosen_log_ratio, rejected_log_ratio))
+      losses = Nx.negate(Nx.log(Nx.sigmoid(logits)))
+      loss = Nx.mean(losses)
+
+      accuracy =
+        chosen_log_ratio
+        |> Nx.greater(rejected_log_ratio)
+        |> Nx.as_type({:f, 32})
+        |> Nx.mean()
+
+      chosen_reward = Nx.multiply(beta, chosen_log_ratio)
+      rejected_reward = Nx.multiply(beta, rejected_log_ratio)
+      margin = Nx.subtract(chosen_reward, rejected_reward) |> Nx.mean()
+
+      metrics = %{
+        loss: Nx.to_number(loss),
+        accuracy: Nx.to_number(accuracy),
+        chosen_reward: Nx.to_number(Nx.mean(chosen_reward)),
+        rejected_reward: Nx.to_number(Nx.mean(rejected_reward)),
+        margin: Nx.to_number(margin),
+        beta: beta,
+        num_pairs: div(length(datums), 2)
+      }
+
+      {loss, metrics}
+    end
+  end
+
+  defp weighted_logprobs(logprobs_list, weights_list, offset) do
+    logprobs_list
+    |> Enum.with_index()
+    |> Enum.map(fn {logprobs, idx} ->
+      weights = Enum.at(weights_list, idx * 2 + offset)
+      Nx.sum(Nx.multiply(logprobs, weights))
+    end)
+    |> Nx.stack()
+  end
+
+  defp weights_to_nx(datum) do
+    datum.loss_fn_inputs["weights"]
+    |> TensorData.to_list()
+    |> Nx.tensor(type: {:f, 32})
+  end
+
+  defp normalize_logprobs(list) do
+    Enum.map(list, fn
+      %Nx.Tensor{} = tensor -> tensor
+      values when is_list(values) -> Nx.tensor(values, type: {:f, 32})
+      other -> Nx.tensor(other, type: {:f, 32})
+    end)
+  end
+
+  defp interleave_logprobs(chosen, rejected) do
+    Enum.zip(chosen, rejected)
+    |> Enum.flat_map(fn {c, r} -> [c, r] end)
   end
 end

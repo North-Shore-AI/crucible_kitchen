@@ -7,7 +7,7 @@ defmodule CrucibleKitchen.Stages.SetEpoch do
   ## State Requirements
 
   - `:dataset` - The supervised dataset
-  - `:epoch_index` - Current epoch index (set by loop)
+  - `:epochs_index` - Current epoch index (set by :epochs loop)
 
   ## State Updates
 
@@ -27,7 +27,7 @@ defmodule CrucibleKitchen.Stages.SetEpoch do
   @impl true
   def execute(context) do
     dataset = get_state(context, :dataset)
-    epoch_index = get_state(context, :epoch_index, 0)
+    epoch_index = get_state(context, :epochs_index, 0)
 
     Logger.info("[SetEpoch] Starting epoch #{epoch_index + 1}")
 

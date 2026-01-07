@@ -35,6 +35,7 @@ defmodule CrucibleKitchen.Workflows.Reinforcement do
   use CrucibleKitchen.Workflow
 
   alias CrucibleKitchen.Stages
+  alias CrucibleKitchen.Stages.{AwaitFuture, ForwardBackward, OptimStep}
 
   workflow do
     # Setup
@@ -54,8 +55,11 @@ defmodule CrucibleKitchen.Workflows.Reinforcement do
       # Assemble training batch
       stage(:assemble_rl_batch, Stages.AssembleRLBatch)
 
-      # PPO update (multiple epochs on same rollout batch)
-      stage(:ppo_update, Stages.PPOUpdate)
+      # Train on assembled batch
+      stage(:forward_backward, ForwardBackward)
+      stage(:await_fb, AwaitFuture, key: :fb_future, result_key: :fb_result)
+      stage(:optim_step, OptimStep)
+      stage(:await_optim, AwaitFuture, key: :optim_future, result_key: :optim_result)
 
       # Log metrics
       stage(:log_rl_metrics, Stages.LogRLMetrics)

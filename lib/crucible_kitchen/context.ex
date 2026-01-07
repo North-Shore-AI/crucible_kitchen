@@ -46,9 +46,13 @@ defmodule CrucibleKitchen.Context do
 
   @type adapter_map :: %{
           required(:training_client) => module() | {module(), keyword()},
+          optional(:sampling_client) => module() | {module(), keyword()},
           required(:dataset_store) => module() | {module(), keyword()},
           optional(:blob_store) => module() | {module(), keyword()},
           optional(:hub_client) => module() | {module(), keyword()},
+          optional(:llm_client) => module() | {module(), keyword()},
+          optional(:embedding_client) => module() | {module(), keyword()},
+          optional(:vector_store) => module() | {module(), keyword()},
           optional(:metrics_store) => module() | {module(), keyword()},
           optional(:model_registry) => module() | {module(), keyword()},
           optional(:evaluator) => module() | {module(), keyword()},
@@ -152,6 +156,7 @@ defmodule CrucibleKitchen.Context do
     train_adapters =
       Map.take(adapters, [
         :training_client,
+        :sampling_client,
         :dataset_store,
         :hub_client,
         :blob_store,

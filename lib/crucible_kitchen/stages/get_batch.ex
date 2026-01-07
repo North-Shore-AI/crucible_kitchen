@@ -7,7 +7,7 @@ defmodule CrucibleKitchen.Stages.GetBatch do
   ## State Requirements
 
   - `:dataset` - The built supervised dataset
-  - `:batch_index` - Current batch index (set by loop)
+  - `:batches_index` - Current batch index (set by :batches loop)
 
   ## State Updates
 
@@ -26,7 +26,7 @@ defmodule CrucibleKitchen.Stages.GetBatch do
   @impl true
   def execute(context) do
     dataset = get_state(context, :dataset)
-    batch_index = get_state(context, :batch_index, 0)
+    batch_index = get_state(context, :batches_index, 0)
 
     batch = get_batch_from_dataset(dataset, batch_index)
 

@@ -60,7 +60,7 @@ defmodule CrucibleKitchen.Workflows.Preference do
 
         # DPO forward-backward
         stage(:dpo_forward_backward, Stages.DPOForwardBackward)
-        stage(:await_dpo, Stages.AwaitFuture, key: :dpo_future)
+        stage(:await_dpo, Stages.AwaitFuture, key: :dpo_future, result_key: :dpo_metrics)
 
         # Optimizer step
         stage(:optim_step, Stages.OptimStep)

@@ -8,26 +8,72 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
     BuildEnvGroup,
     ComputeAdvantages,
     DoRollout,
-    LogRLMetrics,
-    PPOUpdate
+    LogRLMetrics
   }
+
+  alias CrucibleTrain.Completers.TokenCompleter
+  alias CrucibleTrain.RL.{StepResult, Trajectory, TrajectoryGroup, Transition}
+  alias CrucibleTrain.Types.{ModelInput, TokensWithLogprobs}
+
+  defmodule TestEnv do
+    @behaviour CrucibleTrain.RL.Env
+
+    defstruct [:id]
+
+    def initial_observation(_env) do
+      {ModelInput.from_ints([1, 2]), []}
+    end
+
+    def step(_env, _action) do
+      %StepResult{
+        reward: 1.0,
+        episode_done: true,
+        next_observation: ModelInput.empty(),
+        next_stop_condition: [],
+        metrics: %{}
+      }
+    end
+  end
+
+  defmodule TestTokenCompleter do
+    @behaviour TokenCompleter
+
+    defstruct []
+
+    def complete(_completer, _model_input, _stop) do
+      {:ok, %TokensWithLogprobs{tokens: [10, 11], maybe_logprobs: [-1.0, -1.0]}}
+    end
+  end
 
   describe "BuildEnvGroup" do
     test "name returns :build_env_group" do
       assert BuildEnvGroup.name() == :build_env_group
     end
 
-    test "builds noop env group" do
-      context =
-        build_context(%{
-          env: :noop,
-          group_size: 4,
-          groups_per_batch: 10
-        })
+    test "stores env_group_builder from config" do
+      builder = build_env_group_builder(2)
+      context = build_context(%{env_group_builder: builder})
 
       assert {:ok, result} = BuildEnvGroup.execute(context)
-      assert result.state.env_group != nil
-      assert result.state.env_config.group_size == 4
+      assert result.state.env_group == builder
+    end
+
+    test "builds env_group_builder from context-aware function" do
+      builder_fun = fn ctx ->
+        group_size = Context.get_config(ctx, :group_size, 1)
+
+        %CrucibleTrain.RL.ProblemGroupBuilder{
+          env_thunk: fn -> %TestEnv{} end,
+          num_envs: group_size,
+          dataset_name: "context_builder"
+        }
+      end
+
+      context = build_context(%{env_group_builder: builder_fun, group_size: 4})
+
+      assert {:ok, result} = BuildEnvGroup.execute(context)
+      assert result.state.env_group.num_envs == 4
+      assert result.state.env_group.dataset_name == "context_builder"
     end
 
     test "emits telemetry event" do
@@ -40,11 +86,12 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
         nil
       )
 
-      context = build_context(%{env: :noop, group_size: 2, groups_per_batch: 5})
+      builder = build_env_group_builder(3)
+      context = build_context(%{env_group_builder: builder})
       {:ok, _} = BuildEnvGroup.execute(context)
 
       assert_receive {:telemetry, [:crucible_kitchen, :rl, :env_group_built], measurements, _}
-      assert measurements.group_size == 2
+      assert measurements.group_size == 3
 
       :telemetry.detach("build-env-group-test")
     end
@@ -55,27 +102,19 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
       assert DoRollout.name() == :do_rollout
     end
 
-    test "performs mock rollout when no adapter" do
-      env_group = %{
-        type: :noop,
-        config: %{group_size: 2},
-        make_envs: fn _opts ->
-          [
-            %{id: "env_1", observation: "Obs 1", done: false},
-            %{id: "env_2", observation: "Obs 2", done: false}
-          ]
-        end
-      }
+    test "rolls out trajectories using token completer" do
+      builder = build_env_group_builder(2)
 
       context =
-        build_context_without_training(%{})
-        |> Context.put_state(:env_group, env_group)
+        build_context(%{})
+        |> Context.put_state(:env_group, builder)
+        |> Context.put_state(:token_completer, %TestTokenCompleter{})
         |> Context.put_state(:rollouts_index, 0)
 
       assert {:ok, result} = DoRollout.execute(context)
-      assert result.state.trajectory_group != nil
-      assert result.state.trajectory_group.num_trajectories == 2
-      assert result.state.rollout_metrics != nil
+      assert %TrajectoryGroup{} = result.state.trajectory_group
+      assert length(result.state.trajectory_group.trajectories_G) == 2
+      assert result.state.rollout_metrics.num_trajectories == 2
     end
 
     test "validation requires env_group" do
@@ -90,44 +129,17 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
     end
 
     test "computes advantages from trajectory group" do
-      trajectory_group = %{
-        trajectories: [
-          %{rewards: [1.0]},
-          %{rewards: [0.5]},
-          %{rewards: [0.0]}
-        ],
-        num_trajectories: 3
-      }
+      trajectory_group = build_trajectory_group([1.0, 0.5, 0.0])
 
       context =
-        build_context(%{gamma: 0.99, gae_lambda: 0.95})
+        build_context(%{})
         |> Context.put_state(:trajectory_group, trajectory_group)
 
       assert {:ok, result} = ComputeAdvantages.execute(context)
       assert length(result.state.advantages) == 3
-      assert length(result.state.returns) == 3
-      assert length(result.state.normalized_advantages) == 3
-    end
 
-    test "normalizes advantages to zero mean" do
-      trajectory_group = %{
-        trajectories: [
-          %{rewards: [10.0]},
-          %{rewards: [5.0]},
-          %{rewards: [0.0]}
-        ],
-        num_trajectories: 3
-      }
-
-      context =
-        build_context(%{gamma: 1.0, gae_lambda: 1.0})
-        |> Context.put_state(:trajectory_group, trajectory_group)
-
-      {:ok, result} = ComputeAdvantages.execute(context)
-
-      # Normalized advantages should have mean close to 0
-      mean = Enum.sum(result.state.normalized_advantages) / 3
-      assert abs(mean) < 0.01
+      mean = Enum.sum(result.state.advantages) / 3
+      assert abs(mean) < 1.0e-6
     end
 
     test "validation requires trajectory_group" do
@@ -141,59 +153,17 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
       assert AssembleRLBatch.name() == :assemble_rl_batch
     end
 
-    test "assembles batch from trajectories" do
-      trajectory_group = %{
-        trajectories: [
-          %{observations: ["O1"], actions: ["A1"], logprobs: [-1.0]},
-          %{observations: ["O2"], actions: ["A2"], logprobs: [-2.0]}
-        ],
-        num_trajectories: 2
-      }
+    test "assembles datums from trajectory group" do
+      trajectory_group = build_trajectory_group([1.0])
 
       context =
         build_context(%{})
         |> Context.put_state(:trajectory_group, trajectory_group)
-        |> Context.put_state(:normalized_advantages, [0.5, -0.5])
-        |> Context.put_state(:returns, [1.0, 0.5])
+        |> Context.put_state(:advantages_g, [[0.0]])
 
       assert {:ok, result} = AssembleRLBatch.execute(context)
-      assert result.state.rl_batch.batch_size == 2
-      assert result.state.rl_batch.observations == ["O1", "O2"]
-      assert result.state.rl_batch.actions == ["A1", "A2"]
-    end
-  end
-
-  describe "PPOUpdate" do
-    test "name returns :ppo_update" do
-      assert PPOUpdate.name() == :ppo_update
-    end
-
-    test "performs mock PPO update when no adapter" do
-      batch = %{
-        observations: ["O1", "O2"],
-        actions: ["A1", "A2"],
-        old_logprobs: [-1.0, -2.0],
-        advantages: [0.5, -0.5],
-        returns: [1.0, 0.5],
-        batch_size: 2
-      }
-
-      context =
-        build_context_without_training(%{
-          clip_epsilon: 0.2,
-          ppo_epochs: 4,
-          kl_penalty_coef: 0.0
-        })
-        |> Context.put_state(:rl_batch, batch)
-
-      assert {:ok, result} = PPOUpdate.execute(context)
-      assert result.state.ppo_metrics != nil
-      assert Map.has_key?(result.state.ppo_metrics, :policy_loss)
-    end
-
-    test "validation requires rl_batch" do
-      context = build_context(%{})
-      assert {:error, _} = PPOUpdate.validate(context)
+      assert [%CrucibleTrain.Types.Datum{}] = result.state.current_batch
+      assert result.state.rl_batch_size == 1
     end
   end
 
@@ -210,17 +180,12 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
           reward_std: 0.1,
           num_trajectories: 10
         })
-        |> Context.put_state(:ppo_metrics, %{
-          policy_loss: 0.1,
-          entropy: 1.5,
-          clip_fraction: 0.15
-        })
+        |> Context.put_state(:fb_result, %{metrics: %{loss: 0.1}})
         |> Context.put_state(:global_step, 5)
 
       assert {:ok, result} = LogRLMetrics.execute(context)
       assert result.state.global_step == 6
 
-      # Check metrics recorded
       assert Enum.any?(result.metrics, &(&1.name == :rl_reward_mean))
       assert Enum.any?(result.metrics, &(&1.name == :rl_policy_loss))
     end
@@ -238,7 +203,7 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
       context =
         build_context(%{})
         |> Context.put_state(:rollout_metrics, %{reward_mean: 0.5})
-        |> Context.put_state(:ppo_metrics, %{policy_loss: 0.2})
+        |> Context.put_state(:fb_result, %{metrics: %{loss: 0.2}})
         |> Context.put_state(:global_step, 10)
 
       {:ok, _} = LogRLMetrics.execute(context)
@@ -250,6 +215,38 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
     end
   end
 
+  defp build_env_group_builder(group_size) do
+    %CrucibleTrain.RL.ProblemGroupBuilder{
+      env_thunk: fn -> %TestEnv{} end,
+      num_envs: group_size,
+      dataset_name: "test"
+    }
+  end
+
+  defp build_trajectory_group(rewards) do
+    trajectories =
+      Enum.map(rewards, fn reward ->
+        %Trajectory{
+          transitions: [
+            %Transition{
+              ob: ModelInput.from_ints([1]),
+              ac: %TokensWithLogprobs{tokens: [2], maybe_logprobs: [-1.0]},
+              reward: reward,
+              episode_done: true,
+              metrics: %{}
+            }
+          ],
+          final_ob: ModelInput.empty()
+        }
+      end)
+
+    %TrajectoryGroup{
+      trajectories_G: trajectories,
+      final_rewards_G: List.duplicate(0.0, length(trajectories)),
+      metrics_G: List.duplicate(%{}, length(trajectories))
+    }
+  end
+
   defp build_context(extra_config) do
     config = Map.merge(%{}, extra_config)
 
@@ -257,17 +254,7 @@ defmodule CrucibleKitchen.Stages.RLStagesTest do
       config,
       %{
         training_client: CrucibleKitchen.Adapters.Noop.TrainingClient,
-        dataset_store: CrucibleKitchen.Adapters.Noop.DatasetStore
-      }
-    )
-  end
-
-  defp build_context_without_training(extra_config) do
-    config = Map.merge(%{}, extra_config)
-
-    Context.new(
-      config,
-      %{
+        sampling_client: CrucibleKitchen.Adapters.Noop.SamplingClient,
         dataset_store: CrucibleKitchen.Adapters.Noop.DatasetStore
       }
     )

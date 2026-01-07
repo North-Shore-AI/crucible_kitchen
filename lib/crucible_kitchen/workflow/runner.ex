@@ -11,6 +11,12 @@ defmodule CrucibleKitchen.Workflow.Runner do
 
   alias CrucibleKitchen.Context
 
+  # State struct for consumer loop to reduce function arity
+  defmodule ConsumerState do
+    @moduledoc false
+    defstruct [:buffer, :done_ref, :body, :workflow_module, :name, :stop_predicate, :idx]
+  end
+
   @doc """
   Run a workflow with the given initial context.
   """
@@ -21,6 +27,21 @@ defmodule CrucibleKitchen.Workflow.Runner do
     Logger.debug("Starting workflow: #{inspect(workflow_module)}")
 
     execute_nodes(workflow_ir, initial_context, workflow_module)
+  end
+
+  @doc """
+  Run an inline workflow IR directly, using the recipe module for callable resolution.
+
+  This is used when a recipe's workflow/0 returns a workflow IR list directly
+  instead of a workflow module.
+  """
+  @spec run_inline(list(), Context.t(), module()) :: {:ok, Context.t()} | {:error, term()}
+  def run_inline(workflow_ir, initial_context, callable_module) do
+    parsed_ir = parse_dsl(workflow_ir, [])
+
+    Logger.debug("Starting inline workflow from recipe: #{inspect(callable_module)}")
+
+    execute_nodes(parsed_ir, initial_context, callable_module)
   end
 
   # Build workflow IR from module
@@ -129,8 +150,13 @@ defmodule CrucibleKitchen.Workflow.Runner do
 
     Logger.debug("Starting loop: #{name} with #{Enum.count(items)} items")
 
-    Enum.reduce_while(items, {:ok, context}, fn item, {:ok, ctx} ->
-      ctx = Context.put_state(ctx, :"#{name}_current", item)
+    items
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, context}, fn {item, idx}, {:ok, ctx} ->
+      ctx =
+        ctx
+        |> Context.put_state(:"#{name}_current", item)
+        |> Context.put_state(:"#{name}_index", idx)
 
       case execute_nodes(body, ctx, workflow_module) do
         {:ok, new_ctx} -> {:cont, {:ok, new_ctx}}
@@ -186,7 +212,17 @@ defmodule CrucibleKitchen.Workflow.Runner do
       end)
 
     # Consumer loop - process items from buffer and check stop condition
-    result = consume_items(buffer, done_ref, body, context, workflow_module, name, stop_predicate)
+    consumer_state = %ConsumerState{
+      buffer: buffer,
+      done_ref: done_ref,
+      body: body,
+      workflow_module: workflow_module,
+      name: name,
+      stop_predicate: stop_predicate,
+      idx: 0
+    }
+
+    result = consume_items(consumer_state, context)
 
     # Wait for producer to finish
     Task.await(producer_task, :infinity)
@@ -207,12 +243,15 @@ defmodule CrucibleKitchen.Workflow.Runner do
     stream
     |> Stream.with_index()
     |> Task.async_stream(
-      fn {item, _idx} -> item end,
+      fn {item, idx} -> {item, idx} end,
       max_concurrency: prefetch,
       ordered: true
     )
-    |> Enum.reduce_while({:ok, context}, fn {:ok, item}, {:ok, ctx} ->
-      ctx = Context.put_state(ctx, :"#{name}_current", item)
+    |> Enum.reduce_while({:ok, context}, fn {:ok, {item, idx}}, {:ok, ctx} ->
+      ctx =
+        ctx
+        |> Context.put_state(:"#{name}_current", item)
+        |> Context.put_state(:"#{name}_index", idx)
 
       case execute_nodes(body, ctx, workflow_module) do
         {:ok, new_ctx} -> {:cont, {:ok, new_ctx}}
@@ -248,22 +287,14 @@ defmodule CrucibleKitchen.Workflow.Runner do
     end
   end
 
-  defp consume_items(buffer, done_ref, body, context, workflow_module, name, stop_predicate) do
-    if resolve_callable(stop_predicate, context, workflow_module) do
-      Agent.update(done_ref, fn _ -> true end)
+  defp consume_items(%ConsumerState{} = state, context) do
+    if resolve_callable(state.stop_predicate, context, state.workflow_module) do
+      Agent.update(state.done_ref, fn _ -> true end)
       {:ok, context}
     else
-      buffer
+      state.buffer
       |> dequeue_item()
-      |> process_consumer_item(
-        buffer,
-        done_ref,
-        body,
-        context,
-        workflow_module,
-        name,
-        stop_predicate
-      )
+      |> process_consumer_item(state, context)
     end
   end
 
@@ -276,38 +307,23 @@ defmodule CrucibleKitchen.Workflow.Runner do
     end)
   end
 
-  defp process_consumer_item(
-         :empty,
-         buffer,
-         done_ref,
-         body,
-         ctx,
-         workflow_module,
-         name,
-         stop_pred
-       ) do
+  defp process_consumer_item(:empty, %ConsumerState{} = state, context) do
     Process.sleep(10)
-    consume_items(buffer, done_ref, body, ctx, workflow_module, name, stop_pred)
+    consume_items(state, context)
   end
 
-  defp process_consumer_item(
-         {:item, item},
-         buffer,
-         done_ref,
-         body,
-         ctx,
-         workflow_module,
-         name,
-         stop_pred
-       ) do
-    new_ctx = Context.put_state(ctx, :"#{name}_current", item)
+  defp process_consumer_item({:item, item}, %ConsumerState{} = state, context) do
+    new_ctx =
+      context
+      |> Context.put_state(:"#{state.name}_current", item)
+      |> Context.put_state(:"#{state.name}_index", state.idx)
 
-    case execute_nodes(body, new_ctx, workflow_module) do
+    case execute_nodes(state.body, new_ctx, state.workflow_module) do
       {:ok, result_ctx} ->
-        consume_items(buffer, done_ref, body, result_ctx, workflow_module, name, stop_pred)
+        consume_items(%{state | idx: state.idx + 1}, result_ctx)
 
       {:error, reason} ->
-        Agent.update(done_ref, fn _ -> true end)
+        Agent.update(state.done_ref, fn _ -> true end)
         {:error, reason}
     end
   end

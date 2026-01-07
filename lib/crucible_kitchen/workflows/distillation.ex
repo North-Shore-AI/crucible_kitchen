@@ -61,10 +61,15 @@ defmodule CrucibleKitchen.Workflows.Distillation do
 
         # Teacher inference (get soft labels)
         stage(:teacher_inference, Stages.TeacherInference)
+        stage(:build_distill_datums, Stages.BuildDistillDatums)
 
         # Student forward-backward with distillation loss
         stage(:distillation_forward_backward, Stages.DistillationForwardBackward)
-        stage(:await_distillation, Stages.AwaitFuture, key: :distillation_future)
+
+        stage(:await_distillation, Stages.AwaitFuture,
+          key: :distillation_future,
+          result_key: :distillation_metrics
+        )
 
         # Optimizer step
         stage(:optim_step, Stages.OptimStep)

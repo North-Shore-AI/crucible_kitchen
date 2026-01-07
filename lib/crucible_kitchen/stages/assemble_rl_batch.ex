@@ -9,20 +9,12 @@ defmodule CrucibleKitchen.Stages.AssembleRLBatch do
 
   **Input:**
   - State: `:trajectory_group` - Trajectories from DoRollout
-  - State: `:normalized_advantages` - Advantages from ComputeAdvantages
-  - State: `:returns` - Returns from ComputeAdvantages
+  - State: `:advantages_g` - Advantages per group from ComputeAdvantages
 
   **Output:**
-  - State: `:rl_batch` - Assembled training batch
-
-  ## Batch Structure
-
-  The RL batch contains:
-  - `observations` - Flattened observations across trajectories
-  - `actions` - Flattened actions
-  - `old_logprobs` - Log probabilities from rollout policy
-  - `advantages` - Normalized advantages
-  - `returns` - Discounted returns (for value function training)
+  - State: `:current_batch` - Assembled training datums
+  - State: `:rl_batch_metadata` - Per-datum metadata
+  - State: `:rl_batch_size` - Batch size
 
   ## Example
 
@@ -32,6 +24,7 @@ defmodule CrucibleKitchen.Stages.AssembleRLBatch do
   use CrucibleKitchen.Stage
 
   alias CrucibleKitchen.Context
+  alias CrucibleTrain.RL.DataProcessing
 
   require Logger
 
@@ -41,36 +34,24 @@ defmodule CrucibleKitchen.Stages.AssembleRLBatch do
   @impl true
   def execute(context) do
     trajectory_group = Context.get_state(context, :trajectory_group)
-    advantages = Context.get_state(context, :normalized_advantages)
-    returns = Context.get_state(context, :returns)
+    advantages_g = Context.get_state(context, :advantages_g)
 
-    Logger.debug("Assembling RL batch from #{trajectory_group.num_trajectories} trajectories")
+    {datums, metadata} =
+      DataProcessing.assemble_training_data(
+        [trajectory_group],
+        advantages_g
+      )
 
-    trajectories = trajectory_group.trajectories
+    batch_size = length(datums)
 
-    # Flatten all trajectory data
-    observations = Enum.flat_map(trajectories, & &1.observations)
-    actions = Enum.flat_map(trajectories, & &1.actions)
-    old_logprobs = Enum.flat_map(trajectories, & &1.logprobs)
+    Logger.debug("Assembled RL batch with #{batch_size} datums")
 
-    batch_size = length(observations)
-
-    rl_batch = %{
-      observations: observations,
-      actions: actions,
-      old_logprobs: old_logprobs,
-      advantages: advantages,
-      returns: returns,
-      batch_size: batch_size,
-      num_trajectories: trajectory_group.num_trajectories
-    }
-
-    Logger.debug("Assembled batch with #{batch_size} steps")
-
-    emit_telemetry(rl_batch)
+    emit_telemetry(batch_size, length(trajectory_group.trajectories_G))
 
     context
-    |> Context.put_state(:rl_batch, rl_batch)
+    |> Context.put_state(:current_batch, datums)
+    |> Context.put_state(:rl_batch_metadata, metadata)
+    |> Context.put_state(:rl_batch_size, batch_size)
     |> then(&{:ok, &1})
   end
 
@@ -80,20 +61,20 @@ defmodule CrucibleKitchen.Stages.AssembleRLBatch do
       Context.get_state(context, :trajectory_group) == nil ->
         {:error, "trajectory_group is required (run DoRollout first)"}
 
-      Context.get_state(context, :normalized_advantages) == nil ->
-        {:error, "normalized_advantages is required (run ComputeAdvantages first)"}
+      Context.get_state(context, :advantages_g) == nil ->
+        {:error, "advantages_g is required (run ComputeAdvantages first)"}
 
       true ->
         :ok
     end
   end
 
-  defp emit_telemetry(batch) do
+  defp emit_telemetry(batch_size, num_trajectories) do
     :telemetry.execute(
       [:crucible_kitchen, :rl, :batch_assembled],
       %{
-        batch_size: batch.batch_size,
-        num_trajectories: batch.num_trajectories
+        batch_size: batch_size,
+        num_trajectories: num_trajectories
       },
       %{}
     )

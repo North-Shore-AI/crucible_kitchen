@@ -60,13 +60,16 @@ defmodule CrucibleKitchen.Stage do
   @doc "Execute the stage's work."
   @callback execute(context()) :: result()
 
+  @doc "Return a schema describing stage options."
+  @callback describe(map()) :: map()
+
   @doc "Validate preconditions before execution."
   @callback validate(context()) :: :ok | {:error, term()}
 
   @doc "Clean up on failure."
   @callback rollback(context(), error :: term()) :: context()
 
-  @optional_callbacks [validate: 1, rollback: 2]
+  @optional_callbacks [describe: 1, validate: 1, rollback: 2]
 
   defmacro __using__(_opts) do
     quote do
@@ -75,10 +78,20 @@ defmodule CrucibleKitchen.Stage do
       import CrucibleKitchen.Stage.Helpers
 
       # Default implementations
+      def describe(_opts) do
+        %{
+          name: name(),
+          description: "Stage #{inspect(name())}",
+          required: [],
+          optional: [],
+          types: %{}
+        }
+      end
+
       def validate(_context), do: :ok
       def rollback(context, _error), do: context
 
-      defoverridable validate: 1, rollback: 2
+      defoverridable describe: 1, validate: 1, rollback: 2
     end
   end
 end

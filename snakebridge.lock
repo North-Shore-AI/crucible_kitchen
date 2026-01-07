@@ -1,0 +1,67 @@
+{
+  "compatibility": {
+    "compute_capability_min": null,
+    "cuda_min": null
+  },
+  "environment": {
+    "elixir_version": "1.19.4",
+    "generator_hash": "29ef1be9a3a40608ee71e155eb871ca34630e23beee9af29441aba9d0ea76d54",
+    "hardware": {
+      "accelerator": "cpu",
+      "cpu_features": [
+        "pclmul",
+        "ssse3",
+        "fma",
+        "sse4_1",
+        "sse4_2",
+        "aes",
+        "avx",
+        "f16c",
+        "avx2"
+      ],
+      "gpu_count": 0
+    },
+    "otp_version": "28",
+    "platform": {
+      "arch": "x86_64",
+      "os": "linux"
+    },
+    "python_packages_hash": "sha256:67ded8e74b12664c6ec48d3e7388d0133854554b365219f5b5d745a73f637ef6",
+    "python_platform": "x86_64-pc-linux-gnu",
+    "python_runtime_hash": "1319c137ea5d30f1d7599943cb0e72666648c20a94cf5932dd095364d07dafeb",
+    "python_version": "3.12.3",
+    "snakebridge_version": "0.6.0"
+  },
+  "libraries": {
+    "math_verify": {
+      "hash": null,
+      "requested": "~> 0.8.0",
+      "resolved": "~> 0.8.0"
+    },
+    "pylatexenc": {
+      "hash": null,
+      "requested": "~> 2.10",
+      "resolved": "~> 2.10"
+    },
+    "sympy": {
+      "hash": null,
+      "requested": "~> 1.14",
+      "resolved": "~> 1.14"
+    }
+  },
+  "python_packages": {
+    "math-verify": {
+      "version": "0.8.0",
+      "hash": null
+    },
+    "pylatexenc": {
+      "version": "2.10",
+      "hash": null
+    },
+    "sympy": {
+      "version": "1.14.0",
+      "hash": null
+    }
+  },
+  "version": "0.6.0"
+}

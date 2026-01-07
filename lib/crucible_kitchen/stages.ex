@@ -53,6 +53,16 @@ defmodule CrucibleKitchen.Stages do
   - `CrucibleKitchen.Stages.PPOUpdate` - PPO policy gradient update
   - `CrucibleKitchen.Stages.LogRLMetrics` - Log RL-specific metrics
 
+  ### Distillation Stages
+  - `CrucibleKitchen.Stages.InitTeacher` - Initialize teacher sampling session
+  - `CrucibleKitchen.Stages.BuildDistillationDataset` - Build distillation dataset
+  - `CrucibleKitchen.Stages.GetDistillationBatch` - Get distillation batch
+  - `CrucibleKitchen.Stages.TeacherInference` - Sample teacher responses
+  - `CrucibleKitchen.Stages.BuildDistillDatums` - Build datums from teacher outputs
+  - `CrucibleKitchen.Stages.DistillationForwardBackward` - Distillation training step
+  - `CrucibleKitchen.Stages.LogDistillationMetrics` - Log distillation metrics
+  - `CrucibleKitchen.Stages.CleanupTeacher` - Cleanup teacher session
+
   ### Cleanup Stages
   - `CrucibleKitchen.Stages.Cleanup` - Clean up resources
 
@@ -110,7 +120,16 @@ defmodule CrucibleKitchen.Stages do
       CrucibleKitchen.Stages.ComputeAdvantages,
       CrucibleKitchen.Stages.AssembleRLBatch,
       CrucibleKitchen.Stages.PPOUpdate,
-      CrucibleKitchen.Stages.LogRLMetrics
+      CrucibleKitchen.Stages.LogRLMetrics,
+      # Distillation stages
+      CrucibleKitchen.Stages.InitTeacher,
+      CrucibleKitchen.Stages.BuildDistillationDataset,
+      CrucibleKitchen.Stages.GetDistillationBatch,
+      CrucibleKitchen.Stages.TeacherInference,
+      CrucibleKitchen.Stages.BuildDistillDatums,
+      CrucibleKitchen.Stages.DistillationForwardBackward,
+      CrucibleKitchen.Stages.LogDistillationMetrics,
+      CrucibleKitchen.Stages.CleanupTeacher
     ]
   end
 end

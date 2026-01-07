@@ -40,10 +40,19 @@ defmodule CrucibleKitchen.Stages.ForwardBackward do
   def execute(context) do
     session = get_state(context, :session)
     batch = get_state(context, :current_batch)
+    loss_fn = get_state(context, :loss_fn) || get_config(context, :loss_fn, nil)
+
+    loss_fn_config =
+      get_state(context, :loss_fn_config) || get_config(context, :loss_fn_config, nil)
 
     ports = get_train_ports(context)
 
-    case TrainingClient.forward_backward(ports, session, batch) do
+    opts =
+      []
+      |> maybe_put(:loss_fn, loss_fn)
+      |> maybe_put(:loss_fn_config, loss_fn_config)
+
+    case TrainingClient.forward_backward(ports, session, batch, opts) do
       {:error, reason} ->
         Logger.error("[ForwardBackward] Failed: #{inspect(reason)}")
         {:error, {:forward_backward_failed, reason}}
@@ -53,4 +62,7 @@ defmodule CrucibleKitchen.Stages.ForwardBackward do
         {:ok, context}
     end
   end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 end

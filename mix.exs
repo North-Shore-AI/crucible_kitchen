@@ -10,6 +10,7 @@ defmodule CrucibleKitchen.MixProject do
       version: @version,
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
+      compilers: [:snakebridge] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -96,7 +97,12 @@ defmodule CrucibleKitchen.MixProject do
       # ==========================================================================
       # PYTHON BRIDGE (stable, from hex)
       # ==========================================================================
-      {:snakebridge, "~> 0.6.0"},
+      {:snakebridge, "~> 0.6.0",
+       libraries: [
+         sympy: "~> 1.14",
+         pylatexenc: "~> 2.10",
+         math_verify: [version: "~> 0.8.0", pypi_package: "math-verify"]
+       ]},
 
       # ==========================================================================
       # TINKEX SDK (Backend adapter reference implementation)
@@ -106,6 +112,9 @@ defmodule CrucibleKitchen.MixProject do
       # ==========================================================================
       # EXTERNAL DEPENDENCIES
       # ==========================================================================
+      {:claude_agent_sdk, "~> 0.6.8"},
+      {:codex_sdk, "~> 0.4.2"},
+      {:chroma, "~> 0.1.2"},
       {:telemetry, "~> 1.2"},
       {:telemetry_metrics, "~> 1.0", override: true},
       {:jason, "~> 1.4"},

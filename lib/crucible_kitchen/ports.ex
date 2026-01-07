@@ -36,6 +36,7 @@ defmodule CrucibleKitchen.Ports do
   | Port | Purpose |
   |------|---------|
   | `:training_client` | Training backend (forward/backward, optim) |
+  | `:sampling_client` | Sampling backend (token-level inference) |
   | `:dataset_store` | Dataset loading |
   | `:blob_store` | Artifact storage (checkpoints, weights) |
   | `:hub_client` | Model hub (HuggingFace, etc.) |
@@ -43,6 +44,9 @@ defmodule CrucibleKitchen.Ports do
   | `:model_registry` | Model versioning and registration |
   | `:evaluator` | Model evaluation |
   | `:feedback_client` | Production feedback and retraining triggers |
+  | `:llm_client` | LLM inference (chat/completions) |
+  | `:embedding_client` | Embedding generation |
+  | `:vector_store` | Vector database operations |
   """
 
   @type adapter_spec :: module() | {module(), keyword()}
@@ -139,9 +143,13 @@ defmodule CrucibleKitchen.Ports do
 
   # Map port names to their behaviour modules
   defp port_behaviour(:training_client), do: CrucibleTrain.Ports.TrainingClient
+  defp port_behaviour(:sampling_client), do: CrucibleTrain.Ports.SamplingClient
   defp port_behaviour(:dataset_store), do: CrucibleTrain.Ports.DatasetStore
   defp port_behaviour(:blob_store), do: CrucibleTrain.Ports.BlobStore
   defp port_behaviour(:hub_client), do: CrucibleTrain.Ports.HubClient
+  defp port_behaviour(:llm_client), do: CrucibleTrain.Ports.LLMClient
+  defp port_behaviour(:embedding_client), do: CrucibleTrain.Ports.EmbeddingClient
+  defp port_behaviour(:vector_store), do: CrucibleTrain.Ports.VectorStore
   defp port_behaviour(:metrics_store), do: CrucibleTelemetry.Ports.MetricsStore
   defp port_behaviour(:model_registry), do: CrucibleKitchen.Ports.ModelRegistry
   defp port_behaviour(:evaluator), do: CrucibleKitchen.Ports.Evaluator

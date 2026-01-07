@@ -9,7 +9,9 @@ defmodule CrucibleKitchen.Stages.BuildEnvGroup do
   ## Context Requirements
 
   **Input:**
-  - Config: `:env` - Environment type (atom) or module
+  - Config: `:env_group_builder` - EnvGroupBuilder struct (preferred)
+  - Config: `:env_thunk` - Zero-arity function to build envs (fallback)
+  - Config: `:env` - Environment type (atom or module, fallback)
   - Config: `:group_size` - Number of environments per group (default: 4)
   - Config: `:groups_per_batch` - Number of groups per batch (default: 100)
   - State: `:raw_dataset` - Dataset for environment prompts (optional)
@@ -34,14 +36,15 @@ defmodule CrucibleKitchen.Stages.BuildEnvGroup do
 
   @impl true
   def execute(context) do
+    env_group_builder = Context.get_config(context, :env_group_builder)
+    env_thunk = Context.get_config(context, :env_thunk)
     env_type = Context.get_config(context, :env, :noop)
     group_size = Context.get_config(context, :group_size, 4)
     groups_per_batch = Context.get_config(context, :groups_per_batch, 100)
     raw_dataset = Context.get_state(context, :raw_dataset)
 
     Logger.info(
-      "Building env group: type=#{inspect(env_type)} " <>
-        "group_size=#{group_size} groups_per_batch=#{groups_per_batch}"
+      "Building env group: group_size=#{group_size} groups_per_batch=#{groups_per_batch}"
     )
 
     env_config = %{
@@ -51,9 +54,10 @@ defmodule CrucibleKitchen.Stages.BuildEnvGroup do
       dataset: raw_dataset
     }
 
-    env_group = build_env_group(env_type, env_config)
+    env_group =
+      resolve_env_group_builder(env_group_builder, env_thunk, env_type, env_config, context)
 
-    emit_telemetry(env_type, group_size, groups_per_batch)
+    emit_telemetry(env_group, env_type, group_size, groups_per_batch)
 
     context
     |> Context.put_state(:env_group, env_group)
@@ -62,41 +66,57 @@ defmodule CrucibleKitchen.Stages.BuildEnvGroup do
   end
 
   @impl true
-  def validate(_context), do: :ok
+  def validate(context) do
+    env_group_builder = Context.get_config(context, :env_group_builder)
+    env_thunk = Context.get_config(context, :env_thunk)
+    env_type = Context.get_config(context, :env, :noop)
 
-  defp build_env_group(:noop, config) do
-    # Noop environment group for testing
-    %{
-      type: :noop,
-      config: config,
-      make_envs: fn _opts ->
-        Enum.map(1..config.group_size, fn i ->
-          %{
-            id: "noop_env_#{i}",
-            observation: "Initial observation #{i}",
-            done: false
-          }
-        end)
-      end
-    }
-  end
-
-  defp build_env_group(module, config) when is_atom(module) do
-    # Custom environment module
-    if Code.ensure_loaded?(module) and function_exported?(module, :make_envs, 1) do
-      %{
-        type: :custom,
-        module: module,
-        config: config,
-        make_envs: fn opts -> module.make_envs(opts) end
-      }
-    else
-      Logger.warning("Environment module #{module} not found, using noop")
-      build_env_group(:noop, config)
+    cond do
+      is_function(env_group_builder, 1) -> :ok
+      env_group_builder != nil -> :ok
+      is_function(env_thunk, 0) -> :ok
+      env_type != :noop -> :ok
+      true -> {:error, "env_group_builder or env_thunk is required"}
     end
   end
 
-  defp emit_telemetry(env_type, group_size, groups_per_batch) do
+  defp resolve_env_group_builder(env_group_builder, _env_thunk, _env_type, _config, context)
+       when is_function(env_group_builder, 1) do
+    env_group_builder.(context)
+  end
+
+  defp resolve_env_group_builder(%_{} = builder, _env_thunk, _env_type, _config, _context),
+    do: builder
+
+  defp resolve_env_group_builder(nil, env_thunk, _env_type, config, _context)
+       when is_function(env_thunk, 0) do
+    %CrucibleTrain.RL.ProblemGroupBuilder{
+      env_thunk: env_thunk,
+      num_envs: config.group_size,
+      dataset_name: "env_group"
+    }
+  end
+
+  defp resolve_env_group_builder(nil, _env_thunk, :noop, config, _context) do
+    %CrucibleTrain.RL.ProblemGroupBuilder{
+      env_thunk: fn -> %CrucibleKitchen.RL.NoopEnv{} end,
+      num_envs: config.group_size,
+      dataset_name: "noop"
+    }
+  end
+
+  defp resolve_env_group_builder(nil, _env_thunk, env_module, config, _context)
+       when is_atom(env_module) do
+    %CrucibleTrain.RL.ProblemGroupBuilder{
+      env_thunk: fn -> struct(env_module) end,
+      num_envs: config.group_size,
+      dataset_name: Atom.to_string(env_module)
+    }
+  end
+
+  defp emit_telemetry(env_group, env_type, group_size, groups_per_batch) do
+    group_size = Map.get(env_group, :num_envs, group_size)
+
     :telemetry.execute(
       [:crucible_kitchen, :rl, :env_group_built],
       %{group_size: group_size, groups_per_batch: groups_per_batch},

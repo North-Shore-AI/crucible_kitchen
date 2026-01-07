@@ -26,3 +26,4 @@ crucible_kitchen-*.tar
 *.tmp
 *.temp
 .DS_Store
+priv/snakepit/python/venv/

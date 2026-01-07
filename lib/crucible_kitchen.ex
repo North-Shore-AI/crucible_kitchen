@@ -154,12 +154,22 @@ defmodule CrucibleKitchen do
   @spec describe(module() | atom()) :: {:ok, map()} | {:error, :not_found}
   def describe(target) do
     case resolve_workflow(target) do
-      {:ok, workflow} ->
+      {:ok, workflow_module} when is_atom(workflow_module) ->
         {:ok,
          %{
            name: workflow_name(target),
-           workflow: workflow,
-           stages: workflow.__workflow__() |> extract_stage_names(),
+           workflow: workflow_module,
+           stages: workflow_module.__workflow__() |> extract_stage_names(),
+           required_adapters: [:training_client, :dataset_store],
+           optional_adapters: [:blob_store, :hub_client, :metrics_store]
+         }}
+
+      {:ok, {:inline_workflow, workflow_ir, _recipe}} ->
+        {:ok,
+         %{
+           name: workflow_name(target),
+           workflow: :inline,
+           stages: extract_stage_names(workflow_ir),
            required_adapters: [:training_client, :dataset_store],
            optional_adapters: [:blob_store, :hub_client, :metrics_store]
          }}
@@ -210,26 +220,45 @@ defmodule CrucibleKitchen do
   # Private
   # ============================================================================
 
-  defp resolve_workflow(name) when is_atom(name) do
-    case Map.get(@builtin_workflows, name) do
-      nil -> resolve_recipe_workflow(name)
-      workflow -> {:ok, workflow}
+  defp resolve_workflow(target) when is_atom(target) do
+    # First check if it's a built-in workflow name
+    case Map.get(@builtin_workflows, target) do
+      nil ->
+        # Check if target is a workflow module (has __workflow__/0)
+        if function_exported?(target, :__workflow__, 0) do
+          {:ok, target}
+        else
+          # Check if target is a recipe module (has workflow/0)
+          resolve_recipe_workflow(target)
+        end
+
+      workflow_module ->
+        {:ok, workflow_module}
     end
   end
 
-  defp resolve_workflow(module) when is_atom(module) do
-    cond do
-      function_exported?(module, :__workflow__, 0) -> {:ok, module}
-      function_exported?(module, :workflow, 0) -> {:ok, module.workflow()}
-      true -> {:error, {:invalid_target, module}}
+  defp resolve_recipe_workflow(recipe) do
+    if function_exported?(recipe, :workflow, 0) do
+      resolve_workflow_result(recipe.workflow(), recipe)
+    else
+      {:error, {:not_a_recipe, recipe}}
     end
   end
 
-  defp resolve_recipe_workflow(name) do
-    case resolve_recipe(name) do
-      {:ok, recipe} -> {:ok, recipe.workflow()}
-      error -> error
+  defp resolve_workflow_result(module, _recipe) when is_atom(module) do
+    if function_exported?(module, :__workflow__, 0) do
+      {:ok, module}
+    else
+      {:error, {:invalid_workflow_module, module}}
     end
+  end
+
+  defp resolve_workflow_result(workflow_ir, recipe) when is_list(workflow_ir) do
+    {:ok, {:inline_workflow, workflow_ir, recipe}}
+  end
+
+  defp resolve_workflow_result(other, _recipe) do
+    {:error, {:invalid_workflow_return, other}}
   end
 
   defp resolve_recipe(module) when is_atom(module) do
@@ -243,8 +272,8 @@ defmodule CrucibleKitchen do
   defp merge_config(target, config) do
     case resolve_recipe(target) do
       {:ok, recipe} ->
-        if function_exported?(recipe, :defaults, 0) do
-          {:ok, Map.merge(recipe.defaults(), config)}
+        if function_exported?(recipe, :default_config, 0) do
+          {:ok, Map.merge(recipe.default_config(), config)}
         else
           {:ok, config}
         end
@@ -276,12 +305,12 @@ defmodule CrucibleKitchen do
           [:crucible_kitchen, :workflow, :run],
           %{workflow: workflow, config: config},
           fn ->
-            result = Runner.run(workflow, context)
+            result = run_workflow(workflow, context)
             {result, %{}}
           end
         )
       else
-        Runner.run(workflow, context)
+        run_workflow(workflow, context)
       end
 
     duration_ms = System.monotonic_time(:millisecond) - started_at
@@ -299,6 +328,15 @@ defmodule CrucibleKitchen do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Run workflow - handles both workflow modules and inline workflow IR
+  defp run_workflow(workflow_module, context) when is_atom(workflow_module) do
+    Runner.run(workflow_module, context)
+  end
+
+  defp run_workflow({:inline_workflow, workflow_ir, recipe_module}, context) do
+    Runner.run_inline(workflow_ir, context, recipe_module)
   end
 
   defp workflow_name(name) when is_atom(name), do: name

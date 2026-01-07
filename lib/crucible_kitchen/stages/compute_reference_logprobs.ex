@@ -25,6 +25,10 @@ defmodule CrucibleKitchen.Stages.ComputeReferenceLogprobs do
   use CrucibleKitchen.Stage
 
   alias CrucibleKitchen.Context
+  alias CrucibleTrain.Ports.SamplingClient
+  alias CrucibleTrain.Renderers.{Renderer, TrainOnWhat, Types}
+  alias CrucibleTrain.Supervised.Common
+  alias CrucibleTrain.Types.{ModelInput, TensorData}
 
   require Logger
 
@@ -34,19 +38,20 @@ defmodule CrucibleKitchen.Stages.ComputeReferenceLogprobs do
   @impl true
   def execute(context) do
     batch = Context.get_state(context, :preference_batch)
+    tokenizer = Context.get_state(context, :tokenizer)
+    model = Context.get_config(context, :model)
+    max_length = Context.get_config(context, :max_length, 8192)
 
-    # Use reference session if available, otherwise use main session
-    ref_session =
-      Context.get_state(context, :reference_session) ||
-        Context.get_state(context, :session)
+    with {:ok, datums} <- build_preference_datums(batch, tokenizer, model, max_length),
+         {:ok, context, ref_session} <- ensure_reference_session(context),
+         {:ok, ref_logprobs} <- compute_logprobs(context, ref_session, datums) do
+      {ref_chosen, ref_rejected} = split_chosen_rejected(ref_logprobs)
 
-    case get_adapter(context, :training_client) do
-      nil ->
-        # No adapter - use mock logprobs for testing
-        mock_logprobs(context, batch)
-
-      {adapter, opts} ->
-        compute_logprobs(context, adapter, opts, ref_session, batch)
+      context
+      |> Context.put_state(:preference_datums, datums)
+      |> Context.put_state(:ref_chosen_logprobs, ref_chosen)
+      |> Context.put_state(:ref_rejected_logprobs, ref_rejected)
+      |> then(&{:ok, &1})
     end
   end
 
@@ -58,49 +63,142 @@ defmodule CrucibleKitchen.Stages.ComputeReferenceLogprobs do
     end
   end
 
-  defp compute_logprobs(context, adapter, opts, session, batch) do
-    Logger.debug("Computing reference logprobs for #{length(batch)} pairs")
+  defp ensure_reference_session(context) do
+    case Context.get_state(context, :reference_session) do
+      nil ->
+        ports = get_train_ports(context)
 
-    # Compute logprobs for chosen responses
-    chosen_inputs =
-      Enum.map(batch, fn pair ->
-        %{prompt: pair.prompt, response: pair.chosen}
-      end)
+        config = %{
+          model:
+            Context.get_config(context, :reference_model) || Context.get_config(context, :model),
+          base_model: Context.get_config(context, :reference_model),
+          model_path: Context.get_config(context, :reference_model_path),
+          checkpoint_path: Context.get_config(context, :reference_checkpoint_path)
+        }
 
-    # Compute logprobs for rejected responses
-    rejected_inputs =
-      Enum.map(batch, fn pair ->
-        %{prompt: pair.prompt, response: pair.rejected}
-      end)
+        case SamplingClient.start_session(ports, config) do
+          {:ok, session} ->
+            context = Context.put_state(context, :reference_session, session)
+            {:ok, context, session}
 
-    with {:ok, chosen_logprobs} <- adapter.compute_logprobs(opts, session, chosen_inputs),
-         {:ok, rejected_logprobs} <- adapter.compute_logprobs(opts, session, rejected_inputs) do
-      Logger.debug("Computed reference logprobs successfully")
+          {:error, reason} ->
+            {:error, {:reference_session_failed, reason}}
+        end
 
-      context
-      |> Context.put_state(:ref_chosen_logprobs, chosen_logprobs)
-      |> Context.put_state(:ref_rejected_logprobs, rejected_logprobs)
-      |> then(&{:ok, &1})
-    else
-      {:error, reason} ->
-        Logger.error("Failed to compute reference logprobs: #{inspect(reason)}")
-        {:error, {:ref_logprobs_failed, reason}}
+      session ->
+        {:ok, context, session}
     end
   end
 
-  defp mock_logprobs(context, batch) do
-    # Generate mock logprobs for testing without real adapter
-    Logger.debug("Using mock reference logprobs (no training_client adapter)")
+  defp compute_logprobs(context, session, datums) do
+    Logger.debug("Computing reference logprobs for #{length(datums)} datums")
+    ports = get_train_ports(context)
 
-    num_pairs = length(batch)
+    logprob_futures =
+      Enum.map(datums, fn datum ->
+        model_input = full_sequence_input(datum)
+        SamplingClient.compute_logprobs(ports, session, model_input)
+      end)
 
-    # Mock logprobs as random negative values (log probs are always <= 0)
-    chosen_logprobs = Enum.map(1..num_pairs, fn _ -> -:rand.uniform() * 10 end)
-    rejected_logprobs = Enum.map(1..num_pairs, fn _ -> -:rand.uniform() * 10 end)
+    logprobs =
+      Enum.map(logprob_futures, fn
+        {:ok, future} ->
+          case SamplingClient.await(ports, future) do
+            {:ok, values} -> drop_prompt_logprob(values)
+            {:error, reason} -> {:error, reason}
+          end
 
-    context
-    |> Context.put_state(:ref_chosen_logprobs, chosen_logprobs)
-    |> Context.put_state(:ref_rejected_logprobs, rejected_logprobs)
-    |> then(&{:ok, &1})
+        {:error, reason} ->
+          {:error, reason}
+      end)
+
+    case Enum.find(logprobs, &match?({:error, _}, &1)) do
+      {:error, reason} ->
+        Logger.error("Failed to compute reference logprobs: #{inspect(reason)}")
+        {:error, {:ref_logprobs_failed, reason}}
+
+      nil ->
+        {:ok, logprobs}
+    end
   end
+
+  defp build_preference_datums(_batch, nil, _model, _max_length),
+    do: {:error, :missing_tokenizer}
+
+  defp build_preference_datums(batch, tokenizer, model, max_length) do
+    renderer_module = renderer_for_model(model)
+
+    with {:ok, renderer_state} <- renderer_module.init(tokenizer: tokenizer) do
+      datums =
+        Enum.flat_map(batch, fn pair ->
+          with {:ok, chosen} <-
+                 build_datum(pair, :chosen, renderer_module, renderer_state, max_length),
+               {:ok, rejected} <-
+                 build_datum(pair, :rejected, renderer_module, renderer_state, max_length) do
+            [chosen, rejected]
+          else
+            _ -> []
+          end
+        end)
+
+      {:ok, datums}
+    end
+  end
+
+  defp build_datum(pair, key, renderer_module, renderer_state, max_length) do
+    prompt = fetch_pair_value(pair, :prompt)
+    response = fetch_pair_value(pair, key)
+
+    if is_binary(prompt) and is_binary(response) do
+      messages = [
+        Types.message("user", prompt),
+        Types.message("assistant", response)
+      ]
+
+      train_on = TrainOnWhat.last_assistant_message()
+
+      {model_input, weights} =
+        Renderer.build_supervised_example(renderer_module, messages, train_on, renderer_state)
+
+      datum = Common.datum_from_model_input_weights(model_input, weights, max_length)
+      {:ok, datum}
+    else
+      {:error, :invalid_pair}
+    end
+  end
+
+  defp fetch_pair_value(pair, key) when is_map(pair) do
+    Map.get(pair, key) || Map.get(pair, Atom.to_string(key))
+  end
+
+  defp full_sequence_input(datum) do
+    target_tokens =
+      datum.loss_fn_inputs["target_tokens"]
+      |> TensorData.to_list()
+
+    case target_tokens do
+      [] -> datum.model_input
+      _ -> ModelInput.append_int(datum.model_input, List.last(target_tokens))
+    end
+  end
+
+  defp drop_prompt_logprob([_ | rest]), do: rest
+  defp drop_prompt_logprob(other), do: other
+
+  defp split_chosen_rejected(logprobs) do
+    chosen = Enum.take_every(logprobs, 2)
+    rejected = logprobs |> Enum.drop(1) |> Enum.take_every(2)
+    {chosen, rejected}
+  end
+
+  defp renderer_for_model(model_name) when is_binary(model_name) do
+    cond do
+      String.contains?(model_name, "Llama-3") -> CrucibleTrain.Renderers.Llama3
+      String.contains?(model_name, "Qwen") -> CrucibleTrain.Renderers.Qwen3
+      String.contains?(model_name, "DeepSeek") -> CrucibleTrain.Renderers.DeepSeekV3
+      true -> CrucibleTrain.Renderers.RoleColon
+    end
+  end
+
+  defp renderer_for_model(_), do: CrucibleTrain.Renderers.RoleColon
 end

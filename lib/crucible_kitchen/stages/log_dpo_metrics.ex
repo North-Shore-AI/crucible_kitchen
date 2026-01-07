@@ -44,14 +44,15 @@ defmodule CrucibleKitchen.Stages.LogDPOMetrics do
   @impl true
   def execute(context) do
     metrics = Context.get_state(context, :dpo_metrics, %{})
+    metrics = normalize_metrics(metrics)
     global_step = Context.get_state(context, :global_step, 0)
     _batch_index = Context.get_state(context, :batch_index, 0)
 
     # Extract metrics with defaults
-    loss = Map.get(metrics, :loss, 0.0)
-    accuracy = Map.get(metrics, :accuracy, 0.0)
-    chosen_reward = Map.get(metrics, :chosen_reward, 0.0)
-    rejected_reward = Map.get(metrics, :rejected_reward, 0.0)
+    loss = fetch_metric(metrics, :loss, 0.0)
+    accuracy = fetch_metric(metrics, :accuracy, 0.0)
+    chosen_reward = fetch_metric(metrics, :chosen_reward, 0.0)
+    rejected_reward = fetch_metric(metrics, :rejected_reward, 0.0)
     margin = Map.get(metrics, :margin, chosen_reward - rejected_reward)
 
     Logger.info(
@@ -77,17 +78,17 @@ defmodule CrucibleKitchen.Stages.LogDPOMetrics do
 
   defp emit_telemetry(step, metrics) do
     measurements = %{
-      loss: Map.get(metrics, :loss, 0.0),
-      accuracy: Map.get(metrics, :accuracy, 0.0),
-      chosen_reward: Map.get(metrics, :chosen_reward, 0.0),
-      rejected_reward: Map.get(metrics, :rejected_reward, 0.0),
+      loss: fetch_metric(metrics, :loss, 0.0),
+      accuracy: fetch_metric(metrics, :accuracy, 0.0),
+      chosen_reward: fetch_metric(metrics, :chosen_reward, 0.0),
+      rejected_reward: fetch_metric(metrics, :rejected_reward, 0.0),
       margin: Map.get(metrics, :margin, 0.0)
     }
 
     metadata = %{
       step: step,
-      beta: Map.get(metrics, :beta, 0.1),
-      num_pairs: Map.get(metrics, :num_pairs, 0)
+      beta: fetch_metric(metrics, :beta, 0.1),
+      num_pairs: fetch_metric(metrics, :num_pairs, 0)
     }
 
     :telemetry.execute(
@@ -100,5 +101,17 @@ defmodule CrucibleKitchen.Stages.LogDPOMetrics do
   defp increment_step(context) do
     current = Context.get_state(context, :global_step, 0)
     Context.put_state(context, :global_step, current + 1)
+  end
+
+  defp normalize_metrics(%Tinkex.Types.ForwardBackwardOutput{metrics: metrics}), do: metrics
+
+  defp normalize_metrics(%{metrics: metrics}) when is_map(metrics), do: metrics
+
+  defp normalize_metrics(metrics) when is_map(metrics), do: metrics
+
+  defp normalize_metrics(_), do: %{}
+
+  defp fetch_metric(metrics, key, default) do
+    Map.get(metrics, key, Map.get(metrics, Atom.to_string(key), default))
   end
 end
